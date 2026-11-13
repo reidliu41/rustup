@@ -6,6 +6,8 @@ mod tests;
 
 use std::{
     collections::VecDeque,
+    fs,
+    io::{BufRead, BufReader, Read},
     path::Path,
     pin::Pin,
     sync::Arc,
@@ -18,6 +20,7 @@ use futures_util::{
     Stream,
     stream::{FuturesUnordered, StreamExt},
 };
+use serde::Deserialize;
 use tokio::task::{JoinHandle, spawn_blocking};
 use tracing::{debug, info, warn};
 
@@ -37,6 +40,12 @@ use crate::{
 };
 
 pub(crate) const CONFIG_FILE: &str = "multirust-config.toml";
+const MANIFEST_HEADER_SIZE_LIMIT: u64 = 4 * 1024;
+
+#[derive(Deserialize)]
+struct ManifestHeader {
+    date: String,
+}
 
 #[derive(Debug)]
 pub struct Manifestation {
@@ -378,6 +387,20 @@ impl Manifestation {
         }
     }
 
+    #[tracing::instrument(level = "trace")]
+    pub(crate) fn load_manifest_date(&self) -> anyhow::Result<Option<String>> {
+        let prefix = self.installation.prefix();
+        if let Some(manifest_path) = prefix.dist_manifest()
+            && let Ok(manifest_file) = fs::File::open(manifest_path)
+            && let Ok(date) = read_manifest_date(manifest_file)
+        {
+            return Ok(Some(date));
+        }
+
+        self.load_manifest()
+            .map(|manifest| manifest.map(|manifest| manifest.date))
+    }
+
     /// Installation using the legacy v1 manifest format
     pub(crate) async fn update_v1(
         &self,
@@ -469,6 +492,23 @@ impl Manifestation {
 
         Ok(tx)
     }
+}
+
+fn read_manifest_date(reader: impl Read) -> anyhow::Result<String> {
+    let mut reader = BufReader::new(reader.take(MANIFEST_HEADER_SIZE_LIMIT));
+    let mut header = String::new();
+    loop {
+        let line_start = header.len();
+        if reader.read_line(&mut header)? == 0 {
+            break;
+        }
+        if header[line_start..].trim_start().starts_with('[') {
+            header.truncate(line_start);
+            break;
+        }
+    }
+
+    Ok(toml::from_str::<ManifestHeader>(&header)?.date)
 }
 
 struct InstallEvents<'a, F> {
