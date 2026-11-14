@@ -20,7 +20,6 @@ use futures_util::{
     Stream,
     stream::{FuturesUnordered, StreamExt},
 };
-use serde::Deserialize;
 use tokio::task::{JoinHandle, spawn_blocking};
 use tracing::{debug, info, warn};
 
@@ -40,12 +39,10 @@ use crate::{
 };
 
 pub(crate) const CONFIG_FILE: &str = "multirust-config.toml";
-const MANIFEST_HEADER_SIZE_LIMIT: u64 = 4 * 1024;
-
-#[derive(Deserialize)]
-struct ManifestHeader {
-    date: String,
-}
+// The serialized manifest currently places `date` within the first 64 bytes.
+// Leave some headroom for reordered or additional root keys; if the header
+// exceeds this limit, loading falls back to parsing the full manifest.
+const MANIFEST_HEADER_SIZE_LIMIT: u64 = 128;
 
 #[derive(Debug)]
 pub struct Manifestation {
@@ -390,11 +387,18 @@ impl Manifestation {
     #[tracing::instrument(level = "trace")]
     pub(crate) fn load_manifest_date(&self) -> anyhow::Result<Option<String>> {
         let prefix = self.installation.prefix();
-        if let Some(manifest_path) = prefix.dist_manifest()
-            && let Ok(manifest_file) = fs::File::open(manifest_path)
-            && let Ok(date) = read_manifest_date(manifest_file)
-        {
-            return Ok(Some(date));
+        if let Some(manifest_path) = prefix.dist_manifest() {
+            let date = fs::File::open(&manifest_path)
+                .map_err(anyhow::Error::from)
+                .and_then(read_manifest_date);
+            match date {
+                Ok(date) => return Ok(Some(date)),
+                Err(error) => debug!(
+                    path = %manifest_path.display(),
+                    %error,
+                    "failed to read manifest date from header; falling back to full manifest parsing"
+                ),
+            }
         }
 
         self.load_manifest()
@@ -494,6 +498,9 @@ impl Manifestation {
     }
 }
 
+/// Parses the manifest date from the root-level fields before the first line
+/// whose first non-whitespace character is `[`, reading at most
+/// `MANIFEST_HEADER_SIZE_LIMIT` bytes.
 fn read_manifest_date(reader: impl Read) -> anyhow::Result<String> {
     let mut reader = BufReader::new(reader.take(MANIFEST_HEADER_SIZE_LIMIT));
     let mut header = String::new();
@@ -508,7 +515,7 @@ fn read_manifest_date(reader: impl Read) -> anyhow::Result<String> {
         }
     }
 
-    Ok(toml::from_str::<ManifestHeader>(&header)?.date)
+    Manifest::parse_date(&header)
 }
 
 struct InstallEvents<'a, F> {

@@ -14,6 +14,7 @@ use std::{
 use anyhow::anyhow;
 use url::Url;
 
+use super::read_manifest_date;
 use crate::{
     config::Cfg,
     dist::{
@@ -37,6 +38,18 @@ use crate::{
 };
 
 const SHA256_HASH_LEN: usize = 64;
+
+#[test]
+fn read_manifest_date_from_serialized_manifest() -> anyhow::Result<()> {
+    let manifest = Manifest::parse(include_str!(
+        "../manifest/tests/channel-rust-nightly-example.toml"
+    ))?;
+    let expected_date = manifest.date.clone();
+    let serialized = manifest.stringify()?;
+
+    assert_eq!(read_manifest_date(serialized.as_bytes())?, expected_date);
+    Ok(())
+}
 
 // Creates a mock dist server populated with some test data
 fn create_mock_dist_server(
